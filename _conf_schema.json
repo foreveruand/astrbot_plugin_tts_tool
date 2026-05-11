@@ -1,0 +1,149 @@
+{
+    "tool_config": {
+        "description": "LLM 工具配置",
+        "type": "object",
+        "items": {
+            "tool_description": {
+                "description": "Function Tool 描述",
+                "type": "text",
+                "default": "Convert text into speech audio. Supports Google Vertex AI Gemini TTS and OpenRouter speech models. Use this when the user wants spoken audio, a voiceover, or a read-aloud version of text.",
+                "hint": "用于帮助大模型理解这个工具应该在什么场景下调用。"
+            },
+            "only_admin": {
+                "description": "仅限管理员使用",
+                "type": "bool",
+                "default": true,
+                "hint": "开启后，只有 AstrBot 管理员可触发该 LLM TTS 工具。"
+            }
+        }
+    },
+    "general_config": {
+        "description": "通用配置",
+        "type": "object",
+        "items": {
+            "default_provider": {
+                "description": "默认提供商",
+                "type": "string",
+                "default": "vertex",
+                "options": ["vertex", "openrouter"],
+                "hint": "当 LLM 未显式指定 provider 时使用。"
+            },
+            "timeout": {
+                "description": "请求超时时间（秒）",
+                "type": "int",
+                "default": 120,
+                "hint": "调用外部 TTS 服务的超时时间。"
+            },
+            "max_chars": {
+                "description": "单次最大字符数",
+                "type": "int",
+                "default": 4000,
+                "hint": "限制单次 TTS 的输入文本长度。"
+            },
+            "send_audio_to_user": {
+                "description": "生成后自动发送给用户",
+                "type": "bool",
+                "default": true,
+                "hint": "开启后，LLM 调用工具成功时会直接向当前会话发送语音消息。"
+            }
+        }
+    },
+    "vertex_config": {
+        "description": "Google Vertex AI",
+        "type": "object",
+        "items": {
+            "enabled": {
+                "description": "启用 Vertex AI",
+                "type": "bool",
+                "default": true,
+                "hint": "启用后可通过 Google Vertex AI Gemini TTS 模型生成语音。"
+            },
+            "credentials": {
+                "description": "服务账号 JSON 凭证文件",
+                "type": "file",
+                "default": [],
+                "file_types": ["json"],
+                "hint": "上传 Google Cloud 服务账号 JSON 文件。"
+            },
+            "project": {
+                "description": "GCP 项目 ID",
+                "type": "string",
+                "default": "",
+                "hint": "Vertex AI 所在的 Google Cloud 项目 ID。"
+            },
+            "location": {
+                "description": "Vertex AI 区域",
+                "type": "string",
+                "default": "us-central1",
+                "hint": "例如 us-central1。"
+            },
+            "model": {
+                "description": "默认模型",
+                "type": "string",
+                "default": "gemini-2.5-flash-tts",
+                "hint": "例如 gemini-2.5-flash-tts、gemini-2.5-pro-tts。"
+            },
+            "voice": {
+                "description": "默认音色",
+                "type": "string",
+                "default": "Kore",
+                "hint": "例如 Kore、Puck、Aoede。"
+            }
+        }
+    },
+    "openrouter_config": {
+        "description": "OpenRouter TTS",
+        "type": "object",
+        "items": {
+            "api_key": {
+                "description": "API Key",
+                "type": "string",
+                "default": "",
+                "hint": "OpenRouter API Key。"
+            },
+            "base_url": {
+                "description": "API 基础地址",
+                "type": "string",
+                "default": "https://openrouter.ai/api/v1",
+                "hint": "默认即可；也支持填写 https://openrouter.ai 或 https://openrouter.ai/api。"
+            },
+            "model": {
+                "description": "默认模型",
+                "type": "string",
+                "default": "openai/gpt-4o-mini-tts-2025-12-15",
+                "hint": "需填写支持 speech 输出的 OpenRouter 模型标识。"
+            },
+            "voice": {
+                "description": "默认音色",
+                "type": "string",
+                "default": "alloy",
+                "hint": "音色名称取决于所选模型和底层提供商。"
+            },
+            "response_format": {
+                "description": "输出格式",
+                "type": "string",
+                "default": "mp3",
+                "options": ["mp3", "pcm"],
+                "hint": "OpenRouter 文档支持 mp3 和 pcm；建议优先使用 mp3。"
+            },
+            "http_referer": {
+                "description": "HTTP-Referer",
+                "type": "string",
+                "default": "",
+                "hint": "可选。按照 OpenRouter 建议填写站点来源。"
+            },
+            "x_title": {
+                "description": "X-Title",
+                "type": "string",
+                "default": "",
+                "hint": "可选。用于在 OpenRouter 控制台中标识应用名称。"
+            },
+            "extra_body": {
+                "description": "额外请求参数(JSON)",
+                "type": "text",
+                "default": "",
+                "hint": "填写 JSON object，会附加到 OpenRouter 的请求体中。适用于 provider fallback 等扩展参数。不能覆盖 model、input、voice、response_format、speed。示例：{\"provider\":{\"order\":[\"openai\",\"azure\"],\"allow_fallbacks\":true}}"
+            }
+        }
+    }
+}
