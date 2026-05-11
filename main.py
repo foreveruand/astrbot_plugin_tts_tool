@@ -317,24 +317,22 @@ class Main(Star):
 
         return False
 
-    def _resolve_tool_provider(self, requested_provider: str | None) -> str:
+    def _resolve_tool_provider(self) -> str:
         default_provider = self._general_config("default_provider", "vertex")
-        normalized = (requested_provider or "").strip().lower()
-        if normalized not in {"vertex", "openrouter"}:
-            normalized = default_provider
-
-        if self._is_provider_configured(normalized):
-            return normalized
 
         if self._is_provider_configured(default_provider):
-            logger.info(
-                "[tts_tool] Requested provider %s not configured; fallback to %s",
-                normalized,
-                default_provider,
-            )
             return default_provider
 
-        return normalized
+        fallback_provider = "openrouter" if default_provider == "vertex" else "vertex"
+        if self._is_provider_configured(fallback_provider):
+            logger.info(
+                "[tts_tool] Default provider %s not configured; fallback to %s",
+                default_provider,
+                fallback_provider,
+            )
+            return fallback_provider
+
+        return default_provider
 
     def _get_vertex_adapter(self) -> VertexTTSAdapter:
         credentials_files = self._vertex_config("credentials", [])
@@ -383,9 +381,6 @@ class Main(Star):
         self,
         event: AstrMessageEvent,
         text: str,
-        provider: str | None = None,
-        voice: str | None = None,
-        model: str | None = None,
         instruction: str | None = None,
         language_code: str | None = None,
         speed: float | None = None,
@@ -394,12 +389,9 @@ class Main(Star):
 
         Args:
             text(string): 要朗读的文本内容。
-            provider(string): 可选。使用的提供商，可选 vertex 或 openrouter。
-            voice(string): 可选。音色名称。Vertex 默认 Kore，OpenRouter 默认 alloy。
-            model(string): 可选。模型名称。Vertex 默认 gemini-2.5-flash-tts，OpenRouter 默认 openai/gpt-4o-mini-tts-2025-12-15。
-            instruction(string): 可选。仅对 Vertex AI 明确生效，用于控制语气、风格、节奏等朗读方式。
+            instruction(string): 可选。用于控制语气、风格、节奏等朗读方式。当前主要对 Vertex AI 明确生效。
             language_code(string): 可选。Vertex AI 的语言代码，例如 en-US、zh-CN。
-            speed(number): 可选。OpenRouter 的播放速度倍率；不支持的模型会忽略。
+            speed(number): 可选。当默认提供商为 OpenRouter 时可用于控制播放速度；不支持的模型会忽略。
         """
         only_admin = self._tool_config("only_admin", True)
         if only_admin and not event.is_admin:
@@ -413,24 +405,20 @@ class Main(Star):
         if len(normalized_text) > max_chars:
             return f"错误：文本长度超过限制，当前最多支持 {max_chars} 个字符。"
 
-        resolved_provider = self._resolve_tool_provider(provider)
+        resolved_provider = self._resolve_tool_provider()
         if resolved_provider == "vertex":
             if not self._is_provider_configured("vertex"):
                 return "错误：未配置可用的 Vertex AI 凭证或项目 ID。"
-            resolved_model = (
-                model or self._vertex_config("model", DEFAULT_VERTEX_MODEL)
-            ).strip()
-            resolved_voice = (
-                voice or self._vertex_config("voice", DEFAULT_VERTEX_VOICE)
-            ).strip()
+            resolved_model = self._vertex_config("model", DEFAULT_VERTEX_MODEL).strip()
+            resolved_voice = self._vertex_config("voice", DEFAULT_VERTEX_VOICE).strip()
         elif resolved_provider == "openrouter":
             if not self._is_provider_configured("openrouter"):
                 return "错误：未配置 OpenRouter API Key。"
-            resolved_model = (
-                model or self._openrouter_config("model", DEFAULT_OPENROUTER_MODEL)
+            resolved_model = self._openrouter_config(
+                "model", DEFAULT_OPENROUTER_MODEL
             ).strip()
-            resolved_voice = (
-                voice or self._openrouter_config("voice", DEFAULT_OPENROUTER_VOICE)
+            resolved_voice = self._openrouter_config(
+                "voice", DEFAULT_OPENROUTER_VOICE
             ).strip()
         else:
             return f"错误：不支持的 provider: {resolved_provider}"

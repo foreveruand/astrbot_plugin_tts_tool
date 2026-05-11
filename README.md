@@ -9,7 +9,7 @@
 
 ## 功能特点
 
-- 统一的 `LLM_TOOL` 接口，LLM 可按需指定 `provider`
+- 统一的 `LLM_TOOL` 接口，`provider`、`model`、`voice` 仅由插件配置决定
 - 支持 Vertex AI 的 Gemini TTS 模型，如 `gemini-2.5-flash-tts`
 - 支持 OpenRouter 的 TTS 接口和语音模型
 - 可选自动把生成好的音频直接发送到当前会话
@@ -102,12 +102,16 @@ generate_tts_audio
 参数：
 
 - `text`: 要朗读的文本
-- `provider`: `vertex` 或 `openrouter`
-- `voice`: 音色名
-- `model`: 模型名
-- `instruction`: 主要用于 Vertex，控制语气、风格、节奏
+- `instruction`: 控制语气、风格、节奏，当前主要用于 Vertex
 - `language_code`: Vertex 的语言代码，如 `en-US`
-- `speed`: OpenRouter 的播放速度倍率
+- `speed`: 当默认提供商为 OpenRouter 时可用于控制播放速度
+
+说明：
+
+- LLM 不能在工具调用时选择 `provider`
+- LLM 不能在工具调用时选择 `model`
+- LLM 不能在工具调用时选择 `voice`
+- 这些都必须由插件配置预先决定
 
 ## 使用建议
 
