@@ -10,8 +10,9 @@ import wave
 from collections.abc import Iterable
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import urlparse
 
-import aiohttp
+import httpx
 import mcp.types
 from google import genai
 from google.genai import types
@@ -56,6 +57,8 @@ NON_RETRYABLE_VERTEX_FINISH_REASONS = {
     "SPII",
     "MODEL_ARMOR",
 }
+
+SUPPORTED_PROXY_SCHEMES = {"http", "socks5"}
 
 
 def _pcm_to_wav_bytes(
@@ -116,6 +119,26 @@ def _extract_error_message(payload_text: str) -> str:
             return str(message)
 
     return payload_text.strip() or "Unknown error"
+
+
+def _normalize_proxy_url(proxy_url: str | None) -> str:
+    normalized = (proxy_url or "").strip()
+    if not normalized:
+        return ""
+
+    parsed = urlparse(normalized)
+    if parsed.scheme not in SUPPORTED_PROXY_SCHEMES:
+        supported = ", ".join(sorted(SUPPORTED_PROXY_SCHEMES))
+        raise ValueError(
+            f"proxy_url must use one of these schemes: {supported}. "
+            f"Received: {parsed.scheme or '(empty)'}"
+        )
+    if not parsed.hostname:
+        raise ValueError("proxy_url must include a hostname")
+    if parsed.port is None:
+        raise ValueError("proxy_url must include a port")
+
+    return normalized
 
 
 def _parse_json_object_config(raw_value: str, field_name: str) -> dict[str, object]:
@@ -302,16 +325,29 @@ def _format_vertex_no_audio_message(
 class VertexTTSAdapter:
     """Google Vertex AI Gemini TTS adapter."""
 
-    def __init__(self, credentials_path: str, project: str, location: str) -> None:
+    def __init__(
+        self,
+        credentials_path: str,
+        project: str,
+        location: str,
+        proxy_url: str = "",
+    ) -> None:
         credentials = service_account.Credentials.from_service_account_file(
             credentials_path,
             scopes=["https://www.googleapis.com/auth/cloud-platform"],
         )
+        http_options = None
+        if proxy_url:
+            http_options = types.HttpOptions(
+                clientArgs={"proxy": proxy_url},
+                asyncClientArgs={"proxy": proxy_url},
+            )
         self.client = genai.Client(
             vertexai=True,
             project=project,
             location=location,
             credentials=credentials,
+            http_options=http_options,
         )
 
     async def synthesize(
@@ -335,7 +371,7 @@ class VertexTTSAdapter:
             speech_config=types.SpeechConfig(
                 languageCode=(language_code or "").strip() or None,
                 voiceConfig=types.VoiceConfig(
-                    prebuiltVoiceConfig=types.PrebuiltVoiceConfig(voiceName=voice)
+                    prebuiltVoiceConfig=types.PrebuiltVoiceConfig(voice_name=voice)
                 ),
             ),
         )
@@ -375,6 +411,7 @@ class OpenRouterTTSAdapter:
         api_key: str,
         base_url: str,
         timeout: int,
+        proxy_url: str = "",
         referer: str = "",
         title: str = "",
         response_format: str = "mp3",
@@ -382,6 +419,7 @@ class OpenRouterTTSAdapter:
         self.api_key = api_key
         self.base_url = _normalize_openrouter_base_url(base_url)
         self.timeout = timeout
+        self.proxy_url = proxy_url
         self.referer = referer.strip()
         self.title = title.strip()
         self.response_format = (response_format or "mp3").strip().lower() or "mp3"
@@ -415,26 +453,28 @@ class OpenRouterTTSAdapter:
         if self.title:
             headers["X-Title"] = self.title
 
-        timeout = aiohttp.ClientTimeout(total=self.timeout)
+        timeout = httpx.Timeout(self.timeout)
         endpoint = f"{self.base_url}/audio/speech"
 
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(endpoint, json=payload, headers=headers) as resp:
-                if resp.status >= 400:
-                    error_text = await resp.text()
-                    raise RuntimeError(
-                        f"OpenRouter API error ({resp.status}): "
-                        f"{_extract_error_message(error_text)}"
-                    )
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            proxy=self.proxy_url or None,
+        ) as client:
+            resp = await client.post(endpoint, json=payload, headers=headers)
+            if resp.status_code >= 400:
+                raise RuntimeError(
+                    f"OpenRouter API error ({resp.status_code}): "
+                    f"{_extract_error_message(resp.text)}"
+                )
 
-                audio_bytes = await resp.read()
-                if not audio_bytes:
-                    raise RuntimeError("OpenRouter returned an empty audio response")
+            audio_bytes = resp.content
+            if not audio_bytes:
+                raise RuntimeError("OpenRouter returned an empty audio response")
 
-                mime_type = resp.headers.get("Content-Type", "audio/mpeg")
-                if self.response_format == "pcm" or _is_pcm_mime_type(mime_type):
-                    return _pcm_to_wav_bytes(audio_bytes), "audio/wav"
-                return audio_bytes, mime_type
+            mime_type = resp.headers.get("Content-Type", "audio/mpeg")
+            if self.response_format == "pcm" or _is_pcm_mime_type(mime_type):
+                return _pcm_to_wav_bytes(audio_bytes), "audio/wav"
+            return audio_bytes, mime_type
 
 
 class Main(Star):
@@ -478,6 +518,9 @@ class Main(Star):
 
     def _openrouter_config(self, key: str, default=None):
         return self._config_get("openrouter_config", key, default)
+
+    def _proxy_url(self) -> str:
+        return _normalize_proxy_url(self._general_config("proxy_url", ""))
 
     def _get_plugin_data_dir(self) -> Path:
         return Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME
@@ -568,6 +611,7 @@ class Main(Star):
             credentials_path=str(credentials_path),
             project=project,
             location=self._vertex_config("location", "us-central1"),
+            proxy_url=self._proxy_url(),
         )
 
     def _get_openrouter_adapter(self) -> OpenRouterTTSAdapter:
@@ -579,6 +623,7 @@ class Main(Star):
             api_key=api_key,
             base_url=self._openrouter_config("base_url", DEFAULT_OPENROUTER_BASE_URL),
             timeout=self._general_config("timeout", 120),
+            proxy_url=self._proxy_url(),
             referer=self._openrouter_config("http_referer", ""),
             title=self._openrouter_config("x_title", ""),
             response_format=self._openrouter_config("response_format", "mp3"),

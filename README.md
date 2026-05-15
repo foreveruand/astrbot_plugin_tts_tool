@@ -24,7 +24,7 @@
 本插件不额外引入新依赖，依赖 AstrBot 主仓库现有的：
 
 - `google-genai`
-- `aiohttp`
+- `httpx[socks]`
 
 ## 配置说明
 
@@ -32,8 +32,15 @@
 
 - `default_provider`: 默认提供商，`vertex` 或 `openrouter`
 - `timeout`: 外部接口超时秒数
+- `proxy_url`: 可选代理地址，支持 `http://host:port` 与 `socks5://host:port`
 - `max_chars`: 单次最大文本长度
 - `send_audio_to_user`: 工具成功后是否自动向当前会话发送语音
+
+说明：
+
+- `proxy_url` 会同时作用于 Vertex AI 与 OpenRouter 请求
+- 当前仅支持 `http` 和 `socks5` 两种代理 scheme
+- 需填写完整地址和端口，例如 `http://127.0.0.1:7890`、`socks5://127.0.0.1:1080`
 
 ### 2. Vertex AI 配置
 

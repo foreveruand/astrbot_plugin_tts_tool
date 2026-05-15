@@ -34,6 +34,12 @@
                 "default": 120,
                 "hint": "调用外部 TTS 服务的超时时间。"
             },
+            "proxy_url": {
+                "description": "代理地址",
+                "type": "string",
+                "default": "",
+                "hint": "可选。支持 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080，作用于 Vertex AI 和 OpenRouter 请求。"
+            },
             "max_chars": {
                 "description": "单次最大字符数",
                 "type": "int",

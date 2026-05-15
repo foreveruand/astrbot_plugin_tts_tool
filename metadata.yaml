@@ -1,6 +1,6 @@
 name: astrbot_plugin_tts_tool
 display_name: LLM TTS 工具
 desc: "为 AstrBot 提供可供 LLM 调用的 TTS 工具，支持 Google Vertex AI Gemini TTS 与 OpenRouter TTS 接口。"
-version: 0.2.1
+version: 0.2.2
 author: foreveruand
 repo: https://github.com/foreveruand/astrbot_plugin_tts_tool

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.2 - 2026-05-15
+
+- Add `general_config.proxy_url` for outbound TTS requests
+- Support both `http://host:port` and `socks5://host:port` proxy formats
+- Apply the configured proxy to both Vertex AI Gemini TTS and OpenRouter speech requests
+
 ## 0.2.1 - 2026-05-15
 
 - Retry transient Vertex no-audio responses up to 3 times before failing
