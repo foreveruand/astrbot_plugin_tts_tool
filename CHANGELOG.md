@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.4 - 2026-05-16
+
+- Add Vertex AI safety filter configuration for Gemini TTS with selectable `safety_threshold` and `safety_method`
+
+## 0.2.3 - 2026-05-16
+
+- Expand Vertex no-audio diagnostics with `response_id`, candidate count, prompt safety, and candidate safety details for easier filtering vs empty-response triage
+
 ## 0.2.2 - 2026-05-15
 
 - Add `general_config.proxy_url` for outbound TTS requests

@@ -55,13 +55,18 @@
 
 - `model = gemini-2.5-flash-tts`
 - `voice = Kore`
+- `safety_threshold = BLOCK_MEDIUM_AND_ABOVE`
+- `safety_method = PROBABILITY`
 
 说明：
 
 - 插件当前通过 `google-genai` SDK 以 `vertexai=True` 调用 Vertex AI
+- 可通过 `safety_threshold` 调整 Gemini 安全过滤强度，支持 `BLOCK_LOW_AND_ABOVE`、`BLOCK_MEDIUM_AND_ABOVE`、`BLOCK_ONLY_HIGH`、`BLOCK_NONE`、`OFF`
+- 可通过 `safety_method` 选择 `PROBABILITY` 或 `SEVERITY`
+- 当前安全过滤配置会统一应用到 `harassment`、`hate speech`、`sexually explicit`、`dangerous content` 四类文本内容
 - Vertex 返回的 PCM 音频会在插件内封装为 `.wav` 文件发送和返回
 - 插件启用时会自动安装并激活 skill：`tts_tool_gemini_prompting`
-- 当 Vertex 偶发返回无音频结果时，插件会自动重试最多 3 次，并在失败日志中附带 `finish_reason`、`prompt_feedback` 等诊断信息
+- 当 Vertex 偶发返回无音频结果时，插件会自动重试最多 3 次，并在失败日志中附带 `response_id`、候选数量、`finish_reason`、`prompt_feedback`、prompt/candidate safety 等诊断信息
 
 ### 3. OpenRouter 配置
 

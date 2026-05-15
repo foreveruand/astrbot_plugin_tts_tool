@@ -94,6 +94,26 @@
                 "type": "string",
                 "default": "Kore",
                 "hint": "例如 Kore、Puck、Aoede。"
+            },
+            "safety_threshold": {
+                "description": "内容过滤强度",
+                "type": "string",
+                "default": "BLOCK_MEDIUM_AND_ABOVE",
+                "options": [
+                    "BLOCK_LOW_AND_ABOVE",
+                    "BLOCK_MEDIUM_AND_ABOVE",
+                    "BLOCK_ONLY_HIGH",
+                    "BLOCK_NONE",
+                    "OFF"
+                ],
+                "hint": "Vertex Gemini safety_settings.threshold。会应用到 harassment、hate speech、sexually explicit、dangerous content 四类内容。OFF 最宽松，BLOCK_LOW_AND_ABOVE 最严格。"
+            },
+            "safety_method": {
+                "description": "内容过滤判定方式",
+                "type": "string",
+                "default": "PROBABILITY",
+                "options": ["PROBABILITY", "SEVERITY"],
+                "hint": "Vertex Gemini safety_settings.method。PROBABILITY 按命中概率过滤，SEVERITY 同时考虑概率和严重程度。"
             }
         }
     },

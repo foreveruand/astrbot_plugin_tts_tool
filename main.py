@@ -59,6 +59,12 @@ NON_RETRYABLE_VERTEX_FINISH_REASONS = {
 }
 
 SUPPORTED_PROXY_SCHEMES = {"http", "socks5"}
+VERTEX_DEFAULT_SAFETY_CATEGORIES = (
+    "HARM_CATEGORY_HARASSMENT",
+    "HARM_CATEGORY_HATE_SPEECH",
+    "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+    "HARM_CATEGORY_DANGEROUS_CONTENT",
+)
 
 
 def _pcm_to_wav_bytes(
@@ -155,6 +161,46 @@ def _parse_json_object_config(raw_value: str, field_name: str) -> dict[str, obje
         raise ValueError(f"{field_name} must be a JSON object")
 
     return payload
+
+
+def _build_vertex_safety_settings(
+    threshold_name: str | None,
+    method_name: str | None,
+) -> list[types.SafetySetting] | None:
+    normalized_threshold = (threshold_name or "").strip().upper()
+    if not normalized_threshold:
+        return None
+
+    try:
+        threshold = getattr(types.HarmBlockThreshold, normalized_threshold)
+    except AttributeError as exc:
+        raise ValueError(
+            "vertex_config.safety_threshold must be one of: "
+            "BLOCK_LOW_AND_ABOVE, BLOCK_MEDIUM_AND_ABOVE, BLOCK_ONLY_HIGH, "
+            "BLOCK_NONE, OFF"
+        ) from exc
+
+    normalized_method = (method_name or "").strip().upper()
+    method = None
+    if normalized_method:
+        try:
+            method = getattr(types.HarmBlockMethod, normalized_method)
+        except AttributeError as exc:
+            raise ValueError(
+                "vertex_config.safety_method must be one of: PROBABILITY, SEVERITY"
+            ) from exc
+
+    safety_settings: list[types.SafetySetting] = []
+    for category_name in VERTEX_DEFAULT_SAFETY_CATEGORIES:
+        category = getattr(types.HarmCategory, category_name)
+        safety_settings.append(
+            types.SafetySetting(
+                category=category,
+                threshold=threshold,
+                method=method,
+            )
+        )
+    return safety_settings
 
 
 class VertexNoAudioError(RuntimeError):
@@ -265,6 +311,7 @@ def _format_vertex_no_audio_message(
     candidates = list(getattr(response, "candidates", None) or [])
     primary_candidate = candidates[0] if candidates else None
 
+    response_id = getattr(response, "response_id", None)
     finish_reason = getattr(primary_candidate, "finish_reason", None)
     finish_message = getattr(primary_candidate, "finish_message", None)
     prompt_feedback = getattr(response, "prompt_feedback", None)
@@ -291,7 +338,20 @@ def _format_vertex_no_audio_message(
                 f"{category or 'unknown'}:{probability or 'unknown'}:blocked={bool(blocked)}"
             )
 
+    prompt_safety_flags: list[str] = []
+    for rating in getattr(prompt_feedback, "safety_ratings", None) or []:
+        category = getattr(rating, "category", None)
+        probability = getattr(rating, "probability", None)
+        blocked = getattr(rating, "blocked", None)
+        if category or probability or blocked:
+            prompt_safety_flags.append(
+                f"{category or 'unknown'}:{probability or 'unknown'}:blocked={bool(blocked)}"
+            )
+
     details: list[str] = [base_message]
+    details.append(f"candidate_count={len(candidates)}")
+    if response_id:
+        details.append(f"response_id={response_id}")
     if model_version:
         details.append(f"model_version={model_version}")
     if finish_reason:
@@ -302,8 +362,10 @@ def _format_vertex_no_audio_message(
         details.append(f"prompt_block_reason={block_reason}")
     if block_reason_message:
         details.append(f"prompt_block_message={block_reason_message}")
+    if prompt_safety_flags:
+        details.append(f"prompt_safety={';'.join(prompt_safety_flags)}")
     if safety_flags:
-        details.append(f"safety={';'.join(safety_flags)}")
+        details.append(f"candidate_safety={';'.join(safety_flags)}")
     if text_parts:
         preview = " ".join(text_parts).replace("\n", " ").strip()
         details.append(f"text_preview={preview[:160]}")
@@ -331,6 +393,7 @@ class VertexTTSAdapter:
         project: str,
         location: str,
         proxy_url: str = "",
+        safety_settings: list[types.SafetySetting] | None = None,
     ) -> None:
         credentials = service_account.Credentials.from_service_account_file(
             credentials_path,
@@ -349,6 +412,7 @@ class VertexTTSAdapter:
             credentials=credentials,
             http_options=http_options,
         )
+        self.safety_settings = safety_settings
 
     async def synthesize(
         self,
@@ -368,6 +432,7 @@ class VertexTTSAdapter:
 
         config = types.GenerateContentConfig(
             response_modalities=["AUDIO"],
+            safety_settings=self.safety_settings,
             speech_config=types.SpeechConfig(
                 languageCode=(language_code or "").strip() or None,
                 voiceConfig=types.VoiceConfig(
@@ -612,6 +677,10 @@ class Main(Star):
             project=project,
             location=self._vertex_config("location", "us-central1"),
             proxy_url=self._proxy_url(),
+            safety_settings=_build_vertex_safety_settings(
+                self._vertex_config("safety_threshold", "BLOCK_MEDIUM_AND_ABOVE"),
+                self._vertex_config("safety_method", "PROBABILITY"),
+            ),
         )
 
     def _get_openrouter_adapter(self) -> OpenRouterTTSAdapter:
