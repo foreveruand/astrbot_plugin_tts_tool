@@ -39,12 +39,22 @@ DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 PCM_SAMPLE_RATE = 24000
 PCM_CHANNELS = 1
 PCM_SAMPLE_WIDTH = 2
+VERTEX_MAX_RETRIES = 3
 OPENROUTER_RESERVED_FIELDS = {
     "model",
     "input",
     "voice",
     "response_format",
     "speed",
+}
+
+NON_RETRYABLE_VERTEX_FINISH_REASONS = {
+    "SAFETY",
+    "RECITATION",
+    "BLOCKLIST",
+    "PROHIBITED_CONTENT",
+    "SPII",
+    "MODEL_ARMOR",
 }
 
 
@@ -124,6 +134,14 @@ def _parse_json_object_config(raw_value: str, field_name: str) -> dict[str, obje
     return payload
 
 
+class VertexNoAudioError(RuntimeError):
+    """Raised when Vertex returns a response without usable audio data."""
+
+    def __init__(self, message: str, *, retryable: bool) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+
+
 def _decode_inline_audio_data(data: bytes | str) -> bytes:
     if isinstance(data, str):
         return base64.b64decode(data)
@@ -158,19 +176,34 @@ def _extract_vertex_audio_response(
 ) -> tuple[bytes, str]:
     candidates = list(getattr(response, "candidates", None) or [])
     if not candidates:
-        raise RuntimeError("Vertex AI returned no candidates")
+        raise VertexNoAudioError(
+            _format_vertex_no_audio_message(
+                response, "Vertex AI returned no candidates"
+            ),
+            retryable=True,
+        )
 
     audio_chunks: list[bytes] = []
     mime_type = "audio/pcm"
+    primary_candidate = candidates[0]
 
-    for chunk, chunk_mime_type in _iter_response_audio_blobs(candidates[0]):
+    for chunk, chunk_mime_type in _iter_response_audio_blobs(primary_candidate):
         if not chunk:
             continue
         audio_chunks.append(chunk)
         mime_type = chunk_mime_type or mime_type
 
     if not audio_chunks:
-        raise RuntimeError("Vertex AI response does not contain audio data")
+        finish_reason = str(
+            getattr(primary_candidate, "finish_reason", "") or ""
+        ).upper()
+        retryable = finish_reason not in NON_RETRYABLE_VERTEX_FINISH_REASONS
+        raise VertexNoAudioError(
+            _format_vertex_no_audio_message(
+                response, "Vertex AI response does not contain audio data"
+            ),
+            retryable=retryable,
+        )
 
     combined_audio = b"".join(audio_chunks)
     if _is_pcm_mime_type(mime_type):
@@ -193,16 +226,77 @@ def _build_vertex_prompt(
 
     prompt_sections: list[str] = []
     if normalized_tone:
-        prompt_sections.extend(
-            [
-                "### DIRECTOR'S NOTES",
-                f"Style: {normalized_tone}",
-            ]
-        )
+        prompt_sections.append(f"Use this speaking style: {normalized_tone}.")
     if normalized_instruction:
-        prompt_sections.append(normalized_instruction)
-    prompt_sections.extend(["#### TRANSCRIPT", normalized_text])
-    return "\n".join(prompt_sections)
+        prompt_sections.append(normalized_instruction.rstrip(".") + ".")
+    direction = " ".join(
+        section.strip() for section in prompt_sections if section.strip()
+    )
+    return f"{direction} {normalized_text}".strip()
+
+
+def _format_vertex_no_audio_message(
+    response: types.GenerateContentResponse,
+    base_message: str,
+) -> str:
+    candidates = list(getattr(response, "candidates", None) or [])
+    primary_candidate = candidates[0] if candidates else None
+
+    finish_reason = getattr(primary_candidate, "finish_reason", None)
+    finish_message = getattr(primary_candidate, "finish_message", None)
+    prompt_feedback = getattr(response, "prompt_feedback", None)
+    block_reason = getattr(prompt_feedback, "block_reason", None)
+    block_reason_message = getattr(prompt_feedback, "block_reason_message", None)
+    usage_metadata = getattr(response, "usage_metadata", None)
+    model_version = getattr(response, "model_version", None)
+
+    text_parts: list[str] = []
+    for part in (
+        getattr(getattr(primary_candidate, "content", None), "parts", None) or []
+    ):
+        text = getattr(part, "text", None)
+        if text:
+            text_parts.append(str(text).strip())
+
+    safety_flags: list[str] = []
+    for rating in getattr(primary_candidate, "safety_ratings", None) or []:
+        category = getattr(rating, "category", None)
+        probability = getattr(rating, "probability", None)
+        blocked = getattr(rating, "blocked", None)
+        if category or probability or blocked:
+            safety_flags.append(
+                f"{category or 'unknown'}:{probability or 'unknown'}:blocked={bool(blocked)}"
+            )
+
+    details: list[str] = [base_message]
+    if model_version:
+        details.append(f"model_version={model_version}")
+    if finish_reason:
+        details.append(f"finish_reason={finish_reason}")
+    if finish_message:
+        details.append(f"finish_message={finish_message}")
+    if block_reason:
+        details.append(f"prompt_block_reason={block_reason}")
+    if block_reason_message:
+        details.append(f"prompt_block_message={block_reason_message}")
+    if safety_flags:
+        details.append(f"safety={';'.join(safety_flags)}")
+    if text_parts:
+        preview = " ".join(text_parts).replace("\n", " ").strip()
+        details.append(f"text_preview={preview[:160]}")
+    if usage_metadata:
+        prompt_tokens = getattr(usage_metadata, "prompt_token_count", None)
+        candidate_tokens = getattr(usage_metadata, "candidates_token_count", None)
+        total_tokens = getattr(usage_metadata, "total_token_count", None)
+        if any(
+            value is not None
+            for value in (prompt_tokens, candidate_tokens, total_tokens)
+        ):
+            details.append(
+                "usage="
+                f"prompt:{prompt_tokens},candidate:{candidate_tokens},total:{total_tokens}"
+            )
+    return "; ".join(details)
 
 
 class VertexTTSAdapter:
@@ -254,7 +348,23 @@ class VertexTTSAdapter:
             )
             return _extract_vertex_audio_response(response)
 
-        return await asyncio.to_thread(_run_generation)
+        last_error: Exception | None = None
+        for attempt in range(1, VERTEX_MAX_RETRIES + 1):
+            try:
+                return await asyncio.to_thread(_run_generation)
+            except VertexNoAudioError as exc:
+                last_error = exc
+                if not exc.retryable or attempt >= VERTEX_MAX_RETRIES:
+                    raise
+                logger.warning(
+                    "[tts_tool] Vertex returned no audio on attempt %s/%s: %s",
+                    attempt,
+                    VERTEX_MAX_RETRIES,
+                    exc,
+                )
+                await asyncio.sleep(min(0.5 * attempt, 1.5))
+
+        raise RuntimeError(f"Vertex AI synthesis failed: {last_error}")
 
 
 class OpenRouterTTSAdapter:

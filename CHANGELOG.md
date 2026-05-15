@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 - 2026-05-15
+
+- Retry transient Vertex no-audio responses up to 3 times before failing
+- Add detailed Vertex diagnostics including finish reason, prompt feedback, safety signals, and text preview when no audio is returned
+- Simplify Gemini/Vertex prompt composition to better match official speech generation guidance
+
 ## 0.2.0 - 2026-05-15
 
 - Convert Gemini PCM responses to playable WAV output and also wrap OpenRouter PCM output into WAV for Telegram compatibility

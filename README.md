@@ -54,6 +54,7 @@
 - 插件当前通过 `google-genai` SDK 以 `vertexai=True` 调用 Vertex AI
 - Vertex 返回的 PCM 音频会在插件内封装为 `.wav` 文件发送和返回
 - 插件启用时会自动安装并激活 skill：`tts_tool_gemini_prompting`
+- 当 Vertex 偶发返回无音频结果时，插件会自动重试最多 3 次，并在失败日志中附带 `finish_reason`、`prompt_feedback` 等诊断信息
 
 ### 3. OpenRouter 配置
 
