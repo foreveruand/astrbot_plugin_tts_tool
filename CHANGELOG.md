@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0 - 2026-05-15
+
+- Convert Gemini PCM responses to playable WAV output and also wrap OpenRouter PCM output into WAV for Telegram compatibility
+- Add the `gemini_tone` tool parameter for short Gemini speaking-style guidance
+- Concatenate all Gemini audio parts instead of reading only the first inline audio chunk, reducing truncated output risk
+- Auto-install and activate the `tts_tool_gemini_prompting` skill in AstrBot `data/skills`
+- Update README usage notes for Gemini prompting and PCM playback behavior
+
 ## 0.1.2 - 2026-05-11
 
 - Remove `provider`, `model`, and `voice` from the exposed LLM tool arguments

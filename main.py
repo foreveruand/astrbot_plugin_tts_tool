@@ -7,6 +7,7 @@ import base64
 import json
 import uuid
 import wave
+from collections.abc import Iterable
 from io import BytesIO
 from pathlib import Path
 
@@ -20,14 +21,24 @@ import astrbot.api.message_components as Comp
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
-from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
+from astrbot.core.skills.skill_manager import SkillManager
+from astrbot.core.utils.astrbot_path import (
+    get_astrbot_plugin_data_path,
+    get_astrbot_skills_path,
+)
 
 PLUGIN_NAME = "astrbot_plugin_tts_tool"
+PLUGIN_DIR = Path(__file__).resolve().parent
+SKILL_NAME = "tts_tool_gemini_prompting"
+SKILL_SOURCE_PATH = PLUGIN_DIR / "skills" / SKILL_NAME / "SKILL.md"
 DEFAULT_VERTEX_MODEL = "gemini-2.5-flash-tts"
 DEFAULT_VERTEX_VOICE = "Kore"
 DEFAULT_OPENROUTER_MODEL = "openai/gpt-4o-mini-tts-2025-12-15"
 DEFAULT_OPENROUTER_VOICE = "alloy"
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+PCM_SAMPLE_RATE = 24000
+PCM_CHANNELS = 1
+PCM_SAMPLE_WIDTH = 2
 OPENROUTER_RESERVED_FIELDS = {
     "model",
     "input",
@@ -40,9 +51,9 @@ OPENROUTER_RESERVED_FIELDS = {
 def _pcm_to_wav_bytes(
     pcm_data: bytes,
     *,
-    channels: int = 1,
-    sample_rate: int = 24000,
-    sample_width: int = 2,
+    channels: int = PCM_CHANNELS,
+    sample_rate: int = PCM_SAMPLE_RATE,
+    sample_width: int = PCM_SAMPLE_WIDTH,
 ) -> bytes:
     """Wrap LINEAR16 PCM bytes into a WAV container."""
     buffer = BytesIO()
@@ -60,6 +71,8 @@ def _guess_suffix(mime_type: str) -> str:
         return ".mp3"
     if normalized in {"audio/ogg", "audio/opus", "audio/ogg; codecs=opus"}:
         return ".ogg"
+    if normalized in {"audio/x-wav", "audio/wave", "audio/vnd.wave"}:
+        return ".wav"
     return ".wav"
 
 
@@ -111,6 +124,87 @@ def _parse_json_object_config(raw_value: str, field_name: str) -> dict[str, obje
     return payload
 
 
+def _decode_inline_audio_data(data: bytes | str) -> bytes:
+    if isinstance(data, str):
+        return base64.b64decode(data)
+    return bytes(data)
+
+
+def _is_pcm_mime_type(mime_type: str) -> bool:
+    normalized = mime_type.split(";", 1)[0].strip().lower()
+    return normalized in {
+        "audio/pcm",
+        "audio/l16",
+        "audio/raw",
+        "application/octet-stream",
+    }
+
+
+def _iter_response_audio_blobs(
+    candidate: types.Candidate | None,
+) -> Iterable[tuple[bytes, str]]:
+    content = getattr(candidate, "content", None)
+    parts = getattr(content, "parts", None) or []
+    for part in parts:
+        inline_data = getattr(part, "inline_data", None)
+        if inline_data is None or getattr(inline_data, "data", None) is None:
+            continue
+        mime_type = getattr(inline_data, "mime_type", None) or "audio/pcm"
+        yield _decode_inline_audio_data(inline_data.data), mime_type
+
+
+def _extract_vertex_audio_response(
+    response: types.GenerateContentResponse,
+) -> tuple[bytes, str]:
+    candidates = list(getattr(response, "candidates", None) or [])
+    if not candidates:
+        raise RuntimeError("Vertex AI returned no candidates")
+
+    audio_chunks: list[bytes] = []
+    mime_type = "audio/pcm"
+
+    for chunk, chunk_mime_type in _iter_response_audio_blobs(candidates[0]):
+        if not chunk:
+            continue
+        audio_chunks.append(chunk)
+        mime_type = chunk_mime_type or mime_type
+
+    if not audio_chunks:
+        raise RuntimeError("Vertex AI response does not contain audio data")
+
+    combined_audio = b"".join(audio_chunks)
+    if _is_pcm_mime_type(mime_type):
+        return _pcm_to_wav_bytes(combined_audio), "audio/wav"
+    return combined_audio, mime_type.split(";", 1)[0].strip() or "audio/wav"
+
+
+def _build_vertex_prompt(
+    text: str,
+    *,
+    instruction: str | None,
+    gemini_tone: str | None,
+) -> str:
+    normalized_text = text.strip()
+    normalized_instruction = (instruction or "").strip()
+    normalized_tone = (gemini_tone or "").strip()
+
+    if not normalized_instruction and not normalized_tone:
+        return normalized_text
+
+    prompt_sections: list[str] = []
+    if normalized_tone:
+        prompt_sections.extend(
+            [
+                "### DIRECTOR'S NOTES",
+                f"Style: {normalized_tone}",
+            ]
+        )
+    if normalized_instruction:
+        prompt_sections.append(normalized_instruction)
+    prompt_sections.extend(["#### TRANSCRIPT", normalized_text])
+    return "\n".join(prompt_sections)
+
+
 class VertexTTSAdapter:
     """Google Vertex AI Gemini TTS adapter."""
 
@@ -133,11 +227,14 @@ class VertexTTSAdapter:
         model: str,
         voice: str,
         instruction: str | None,
+        gemini_tone: str | None,
         language_code: str | None,
     ) -> tuple[bytes, str]:
-        prompt = text.strip()
-        if instruction and instruction.strip():
-            prompt = f"{instruction.strip()}\n\n{prompt}"
+        prompt = _build_vertex_prompt(
+            text,
+            instruction=instruction,
+            gemini_tone=gemini_tone,
+        )
 
         config = types.GenerateContentConfig(
             response_modalities=["AUDIO"],
@@ -149,31 +246,15 @@ class VertexTTSAdapter:
             ),
         )
 
-        def _run_generation() -> bytes:
+        def _run_generation() -> tuple[bytes, str]:
             response = self.client.models.generate_content(
                 model=model,
                 contents=prompt,
                 config=config,
             )
-            candidates = getattr(response, "candidates", None) or []
-            if not candidates:
-                raise RuntimeError("Vertex AI returned no candidates")
+            return _extract_vertex_audio_response(response)
 
-            parts = getattr(candidates[0].content, "parts", None) or []
-            if not parts:
-                raise RuntimeError("Vertex AI returned no audio parts")
-
-            inline_data = getattr(parts[0], "inline_data", None)
-            if inline_data is None or getattr(inline_data, "data", None) is None:
-                raise RuntimeError("Vertex AI response does not contain audio data")
-
-            data = inline_data.data
-            if isinstance(data, str):
-                return base64.b64decode(data)
-            return bytes(data)
-
-        pcm_data = await asyncio.to_thread(_run_generation)
-        return _pcm_to_wav_bytes(pcm_data), "audio/wav"
+        return await asyncio.to_thread(_run_generation)
 
 
 class OpenRouterTTSAdapter:
@@ -241,6 +322,8 @@ class OpenRouterTTSAdapter:
                     raise RuntimeError("OpenRouter returned an empty audio response")
 
                 mime_type = resp.headers.get("Content-Type", "audio/mpeg")
+                if self.response_format == "pcm" or _is_pcm_mime_type(mime_type):
+                    return _pcm_to_wav_bytes(audio_bytes), "audio/wav"
                 return audio_bytes, mime_type
 
 
@@ -259,6 +342,10 @@ class Main(Star):
             desc = self._tool_config("tool_description", "").strip()
             if desc:
                 tool.description = desc
+        try:
+            self._install_or_update_skill()
+        except Exception as exc:
+            logger.warning("[tts_tool] Failed to install skill: %s", exc, exc_info=True)
         logger.info("[tts_tool] Plugin initialized")
 
     async def terminate(self) -> None:
@@ -298,6 +385,27 @@ class Main(Star):
         output_dir = self._get_plugin_data_dir() / "generated_audio"
         output_dir.mkdir(parents=True, exist_ok=True)
         return output_dir
+
+    def _install_or_update_skill(self) -> None:
+        if not SKILL_SOURCE_PATH.is_file():
+            logger.warning(
+                "[tts_tool] Skill source file not found: %s", SKILL_SOURCE_PATH
+            )
+            return
+
+        skill_dir = Path(get_astrbot_skills_path()) / SKILL_NAME
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        target_path = skill_dir / "SKILL.md"
+        skill_content = SKILL_SOURCE_PATH.read_text(encoding="utf-8")
+        current_content = ""
+        if target_path.exists():
+            current_content = target_path.read_text(encoding="utf-8")
+
+        if current_content != skill_content:
+            target_path.write_text(skill_content, encoding="utf-8")
+
+        SkillManager().set_skill_active(SKILL_NAME, True)
+        logger.info("[tts_tool] Installed skill: %s", SKILL_NAME)
 
     def _is_provider_configured(self, provider: str) -> bool:
         if provider == "vertex":
@@ -382,6 +490,7 @@ class Main(Star):
         event: AstrMessageEvent,
         text: str,
         instruction: str | None = None,
+        gemini_tone: str | None = None,
         language_code: str | None = None,
         speed: float | None = None,
     ) -> str | mcp.types.CallToolResult:
@@ -390,6 +499,7 @@ class Main(Star):
         Args:
             text(string): 要朗读的文本内容。
             instruction(string): 可选。用于控制语气、风格、节奏等朗读方式。当前主要对 Vertex AI 明确生效。
+            gemini_tone(string): 可选。Gemini/Vertex 专用的语气与风格提示，例如 calm documentary narration、excited livestream host、soft whispery bedtime story。
             language_code(string): 可选。Vertex AI 的语言代码，例如 en-US、zh-CN。
             speed(number): 可选。当默认提供商为 OpenRouter 时可用于控制播放速度；不支持的模型会忽略。
         """
@@ -431,6 +541,7 @@ class Main(Star):
                     model=resolved_model,
                     voice=resolved_voice,
                     instruction=instruction,
+                    gemini_tone=gemini_tone,
                     language_code=language_code,
                 )
             else:
