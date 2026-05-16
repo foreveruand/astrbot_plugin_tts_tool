@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0 - 2026-05-16
+
+- Add native xAI Grok TTS support via `POST /v1/tts` with configurable `voice_id`, `language`, and output format settings
+- Rename the auto-installed prompting skill to `tts_tool_gemini_grok_prompting`
+- Document Grok inline audio tag guidance separately from Gemini because the tag syntax is similar but not identical
+
 ## 0.2.4 - 2026-05-16
 
 - Add Vertex AI safety filter configuration for Gemini TTS with selectable `safety_threshold` and `safety_method`

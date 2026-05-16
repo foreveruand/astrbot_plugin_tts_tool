@@ -30,13 +30,20 @@ from astrbot.core.utils.astrbot_path import (
 
 PLUGIN_NAME = "astrbot_plugin_tts_tool"
 PLUGIN_DIR = Path(__file__).resolve().parent
-SKILL_NAME = "tts_tool_gemini_prompting"
+SKILL_NAME = "tts_tool_gemini_grok_prompting"
 SKILL_SOURCE_PATH = PLUGIN_DIR / "skills" / SKILL_NAME / "SKILL.md"
+LEGACY_SKILL_NAMES = ("tts_tool_gemini_prompting",)
 DEFAULT_VERTEX_MODEL = "gemini-2.5-flash-tts"
 DEFAULT_VERTEX_VOICE = "Kore"
 DEFAULT_OPENROUTER_MODEL = "openai/gpt-4o-mini-tts-2025-12-15"
 DEFAULT_OPENROUTER_VOICE = "alloy"
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1"
+DEFAULT_XAI_VOICE_ID = "eve"
+DEFAULT_XAI_LANGUAGE = "auto"
+DEFAULT_XAI_CODEC = "mp3"
+DEFAULT_XAI_SAMPLE_RATE = 24000
+DEFAULT_XAI_BIT_RATE = 128000
 PCM_SAMPLE_RATE = 24000
 PCM_CHANNELS = 1
 PCM_SAMPLE_WIDTH = 2
@@ -65,6 +72,7 @@ VERTEX_DEFAULT_SAFETY_CATEGORIES = (
     "HARM_CATEGORY_SEXUALLY_EXPLICIT",
     "HARM_CATEGORY_DANGEROUS_CONTENT",
 )
+SUPPORTED_PROVIDERS = ("vertex", "openrouter", "xai")
 
 
 def _pcm_to_wav_bytes(
@@ -104,6 +112,30 @@ def _normalize_openrouter_base_url(base_url: str) -> str:
     if url.endswith("/api"):
         return f"{url}/v1"
     return f"{url}/api/v1"
+
+
+def _normalize_xai_base_url(base_url: str) -> str:
+    url = (base_url or "").strip().rstrip("/")
+    if not url:
+        return DEFAULT_XAI_BASE_URL
+    if url.endswith("/v1"):
+        return url
+    return f"{url}/v1"
+
+
+def _codec_to_mime_type(codec: str) -> str:
+    normalized = (codec or "").strip().lower()
+    if normalized == "mp3":
+        return "audio/mpeg"
+    if normalized == "wav":
+        return "audio/wav"
+    if normalized == "pcm":
+        return "audio/pcm"
+    if normalized == "mulaw":
+        return "audio/basic"
+    if normalized == "alaw":
+        return "audio/x-alaw-basic"
+    return "application/octet-stream"
 
 
 def _extract_error_message(payload_text: str) -> str:
@@ -542,6 +574,75 @@ class OpenRouterTTSAdapter:
             return audio_bytes, mime_type
 
 
+class XAITTSAdapter:
+    """xAI Grok speech adapter."""
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        timeout: int,
+        proxy_url: str = "",
+        codec: str = DEFAULT_XAI_CODEC,
+        sample_rate: int = DEFAULT_XAI_SAMPLE_RATE,
+        bit_rate: int = DEFAULT_XAI_BIT_RATE,
+    ) -> None:
+        self.api_key = api_key
+        self.base_url = _normalize_xai_base_url(base_url)
+        self.timeout = timeout
+        self.proxy_url = proxy_url
+        self.codec = (codec or DEFAULT_XAI_CODEC).strip().lower() or DEFAULT_XAI_CODEC
+        self.sample_rate = int(sample_rate or DEFAULT_XAI_SAMPLE_RATE)
+        self.bit_rate = int(bit_rate or DEFAULT_XAI_BIT_RATE)
+
+    async def synthesize(
+        self,
+        *,
+        text: str,
+        voice_id: str,
+        language: str,
+    ) -> tuple[bytes, str]:
+        payload: dict[str, object] = {
+            "text": text,
+            "voice_id": voice_id,
+            "language": language,
+            "output_format": {
+                "codec": self.codec,
+                "sample_rate": self.sample_rate,
+            },
+        }
+        if self.codec == "mp3":
+            payload["output_format"]["bit_rate"] = self.bit_rate
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        timeout = httpx.Timeout(self.timeout)
+        endpoint = f"{self.base_url}/tts"
+
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            proxy=self.proxy_url or None,
+        ) as client:
+            resp = await client.post(endpoint, json=payload, headers=headers)
+            if resp.status_code >= 400:
+                raise RuntimeError(
+                    f"xAI API error ({resp.status_code}): "
+                    f"{_extract_error_message(resp.text)}"
+                )
+
+            audio_bytes = resp.content
+            if not audio_bytes:
+                raise RuntimeError("xAI returned an empty audio response")
+
+            mime_type = resp.headers.get("Content-Type", "").split(";", 1)[0].strip()
+            if not mime_type:
+                mime_type = _codec_to_mime_type(self.codec)
+            return audio_bytes, mime_type
+
+
 class Main(Star):
     """Expose a unified TTS LLM tool."""
 
@@ -584,6 +685,9 @@ class Main(Star):
     def _openrouter_config(self, key: str, default=None):
         return self._config_get("openrouter_config", key, default)
 
+    def _xai_config(self, key: str, default=None):
+        return self._config_get("xai_config", key, default)
+
     def _proxy_url(self) -> str:
         return _normalize_proxy_url(self._general_config("proxy_url", ""))
 
@@ -622,7 +726,11 @@ class Main(Star):
         if current_content != skill_content:
             target_path.write_text(skill_content, encoding="utf-8")
 
-        SkillManager().set_skill_active(SKILL_NAME, True)
+        skill_manager = SkillManager()
+        skill_manager.set_skill_active(SKILL_NAME, True)
+        for legacy_skill_name in LEGACY_SKILL_NAMES:
+            if legacy_skill_name != SKILL_NAME:
+                skill_manager.set_skill_active(legacy_skill_name, False)
         logger.info("[tts_tool] Installed skill: %s", SKILL_NAME)
 
     def _is_provider_configured(self, provider: str) -> bool:
@@ -641,22 +749,29 @@ class Main(Star):
         if provider == "openrouter":
             return bool(self._openrouter_config("api_key", "").strip())
 
+        if provider == "xai":
+            return bool(self._xai_config("api_key", "").strip())
+
         return False
 
     def _resolve_tool_provider(self) -> str:
         default_provider = self._general_config("default_provider", "vertex")
+        if default_provider not in SUPPORTED_PROVIDERS:
+            return default_provider
 
         if self._is_provider_configured(default_provider):
             return default_provider
 
-        fallback_provider = "openrouter" if default_provider == "vertex" else "vertex"
-        if self._is_provider_configured(fallback_provider):
-            logger.info(
-                "[tts_tool] Default provider %s not configured; fallback to %s",
-                default_provider,
-                fallback_provider,
-            )
-            return fallback_provider
+        for fallback_provider in SUPPORTED_PROVIDERS:
+            if fallback_provider == default_provider:
+                continue
+            if self._is_provider_configured(fallback_provider):
+                logger.info(
+                    "[tts_tool] Default provider %s not configured; fallback to %s",
+                    default_provider,
+                    fallback_provider,
+                )
+                return fallback_provider
 
         return default_provider
 
@@ -698,6 +813,21 @@ class Main(Star):
             response_format=self._openrouter_config("response_format", "mp3"),
         )
 
+    def _get_xai_adapter(self) -> XAITTSAdapter:
+        api_key = self._xai_config("api_key", "").strip()
+        if not api_key:
+            raise ValueError("xAI API key is not configured")
+
+        return XAITTSAdapter(
+            api_key=api_key,
+            base_url=self._xai_config("base_url", DEFAULT_XAI_BASE_URL),
+            timeout=self._general_config("timeout", 120),
+            proxy_url=self._proxy_url(),
+            codec=self._xai_config("codec", DEFAULT_XAI_CODEC),
+            sample_rate=self._xai_config("sample_rate", DEFAULT_XAI_SAMPLE_RATE),
+            bit_rate=self._xai_config("bit_rate", DEFAULT_XAI_BIT_RATE),
+        )
+
     def _build_output_path(self, mime_type: str) -> Path:
         suffix = _guess_suffix(mime_type)
         return self._get_output_dir() / f"tts_{uuid.uuid4().hex}{suffix}"
@@ -724,7 +854,7 @@ class Main(Star):
             text(string): 要朗读的文本内容。
             instruction(string): 可选。用于控制语气、风格、节奏等朗读方式。当前主要对 Vertex AI 明确生效。
             gemini_tone(string): 可选。Gemini/Vertex 专用的语气与风格提示，例如 calm documentary narration、excited livestream host、soft whispery bedtime story。
-            language_code(string): 可选。Vertex AI 的语言代码，例如 en-US、zh-CN。
+            language_code(string): 可选。Vertex AI 或 xAI 的语言代码，例如 en-US、zh-CN、zh、auto。
             speed(number): 可选。当默认提供商为 OpenRouter 时可用于控制播放速度；不支持的模型会忽略。
         """
         only_admin = self._tool_config("only_admin", True)
@@ -754,6 +884,11 @@ class Main(Star):
             resolved_voice = self._openrouter_config(
                 "voice", DEFAULT_OPENROUTER_VOICE
             ).strip()
+        elif resolved_provider == "xai":
+            if not self._is_provider_configured("xai"):
+                return "错误：未配置 xAI API Key。"
+            resolved_model = "xai-tts"
+            resolved_voice = self._xai_config("voice_id", DEFAULT_XAI_VOICE_ID).strip()
         else:
             return f"错误：不支持的 provider: {resolved_provider}"
 
@@ -769,25 +904,38 @@ class Main(Star):
                     language_code=language_code,
                 )
             else:
-                adapter = self._get_openrouter_adapter()
-                extra_body = _parse_json_object_config(
-                    self._openrouter_config("extra_body", ""),
-                    "openrouter_config.extra_body",
-                )
-                conflicting_keys = OPENROUTER_RESERVED_FIELDS.intersection(extra_body)
-                if conflicting_keys:
-                    joined_keys = ", ".join(sorted(conflicting_keys))
-                    raise ValueError(
-                        "openrouter_config.extra_body contains reserved fields: "
-                        f"{joined_keys}"
+                if resolved_provider == "openrouter":
+                    adapter = self._get_openrouter_adapter()
+                    extra_body = _parse_json_object_config(
+                        self._openrouter_config("extra_body", ""),
+                        "openrouter_config.extra_body",
                     )
-                audio_bytes, mime_type = await adapter.synthesize(
-                    text=normalized_text,
-                    model=resolved_model,
-                    voice=resolved_voice,
-                    speed=speed,
-                    extra_body=extra_body,
-                )
+                    conflicting_keys = OPENROUTER_RESERVED_FIELDS.intersection(extra_body)
+                    if conflicting_keys:
+                        joined_keys = ", ".join(sorted(conflicting_keys))
+                        raise ValueError(
+                            "openrouter_config.extra_body contains reserved fields: "
+                            f"{joined_keys}"
+                        )
+                    audio_bytes, mime_type = await adapter.synthesize(
+                        text=normalized_text,
+                        model=resolved_model,
+                        voice=resolved_voice,
+                        speed=speed,
+                        extra_body=extra_body,
+                    )
+                else:
+                    adapter = self._get_xai_adapter()
+                    resolved_language = (
+                        (language_code or "").strip()
+                        or self._xai_config("language", DEFAULT_XAI_LANGUAGE).strip()
+                        or DEFAULT_XAI_LANGUAGE
+                    )
+                    audio_bytes, mime_type = await adapter.synthesize(
+                        text=normalized_text,
+                        voice_id=resolved_voice,
+                        language=resolved_language,
+                    )
 
             output_path = self._build_output_path(mime_type)
             output_path.write_bytes(audio_bytes)
